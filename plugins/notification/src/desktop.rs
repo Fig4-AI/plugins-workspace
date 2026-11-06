@@ -356,6 +356,7 @@ mod imp {
         pub(super) shown: Mutex<HashMap<u32, (i32, Value)>>,
         /// The `on_close` callbacks of the tracked notifications, by server id.
         pub(super) on_close: Mutex<HashMap<u32, crate::OnClose>>,
+        pub(super) tokens: Mutex<HashMap<u32, String>>,
     }
 
     /// The payload of an `actionPerformed` event, as the mobile plugins send it.
@@ -659,9 +660,18 @@ mod imp {
                 Ok((server_id, action)) => (server_id, action),
                 Err(_) => return,
             },
+            Some("ActivationToken") => {
+                if let Ok((server_id, token)) = body.deserialize::<(u32, String)>()
+                    && lock(&shared.tracker.shown).contains_key(&server_id)
+                {
+                    lock(&shared.tracker.tokens).insert(server_id, token);
+                }
+                return;
+            }
             Some("NotificationClosed") => {
                 if let Ok((server_id, _reason)) = body.deserialize::<(u32, u32)>() {
                     lock(&shared.tracker.shown).remove(&server_id);
+                    lock(&shared.tracker.tokens).remove(&server_id);
                     // Taken out first, so the callback runs without the lock held.
                     let on_close = lock(&shared.tracker.on_close).remove(&server_id);
                     if let Some(on_close) = on_close {
@@ -678,9 +688,14 @@ mod imp {
         let data = lock(&shared.tracker.shown)
             .get(&server_id)
             .map(|(_, data)| data.clone());
+        let token = lock(&shared.tracker.tokens).remove(&server_id);
         if let Some(data) = data {
             let action = if action == "default" { "tap" } else { &action };
-            shared.dispatch(performed(action, &data));
+            let mut payload = performed(action, &data);
+            if let Some(token) = token {
+                payload["activationToken"] = token.into();
+            }
+            shared.dispatch(payload);
         }
     }
 
@@ -837,6 +852,31 @@ mod tests {
 
         assert_eq!(*seen.lock().unwrap(), ["tap", "snooze"]);
         assert!(lock(&shared.tracker.shown).is_empty());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn an_action_reports_the_activation_token_handed_out_just_before_it() {
+        let shared = Shared::default();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&seen);
+        lock(&shared.handlers).push(Arc::new(move |performed: &ActionPerformed| {
+            record
+                .lock()
+                .unwrap()
+                .push(performed.activation_token().map(str::to_owned));
+        }));
+        lock(&shared.tracker.shown).insert(41, (7, serde_json::json!({ "id": 7 })));
+
+        imp::on_signal(&shared, &signal("ActivationToken", &(42u32, "theirs")));
+        imp::on_signal(&shared, &signal("ActivationToken", &(41u32, "ours")));
+        imp::on_signal(&shared, &signal("ActionInvoked", &(41u32, "default")));
+        imp::on_signal(&shared, &signal("ActionInvoked", &(41u32, "default")));
+        imp::on_signal(&shared, &signal("ActivationToken", &(41u32, "unused")));
+        imp::on_signal(&shared, &signal("NotificationClosed", &(41u32, 2u32)));
+
+        assert_eq!(*seen.lock().unwrap(), [Some("ours".to_owned()), None]);
+        assert!(lock(&shared.tracker.tokens).is_empty());
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]

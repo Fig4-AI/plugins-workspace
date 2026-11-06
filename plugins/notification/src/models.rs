@@ -725,6 +725,8 @@ pub struct ActionPerformed {
     /// still worth reporting when its notification cannot be read.
     #[serde(default, deserialize_with = "lenient_notification")]
     notification: Option<ActiveNotification>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    activation_token: Option<String>,
 }
 
 fn lenient_notification<'de, D: serde::Deserializer<'de>>(
@@ -749,6 +751,10 @@ impl ActionPerformed {
     /// The notification the action was performed on, as far as the platform reports it.
     pub fn notification(&self) -> Option<&ActiveNotification> {
         self.notification.as_ref()
+    }
+
+    pub fn activation_token(&self) -> Option<&str> {
+        self.activation_token.as_deref()
     }
 }
 
